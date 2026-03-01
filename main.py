@@ -10,12 +10,9 @@ SCREEN_HEIGHT = 720
 SKY_HEIGHT = 500
 BLOCK_SIZE = 128
 
-# Grid dimensions
 GRID_COLS = SCREEN_WIDTH // BLOCK_SIZE + 1
-GRID_ROWS = 40  # more rows to allow deeper digging
+GRID_ROWS = 40
 
-# Depth thresholds (in grid rows from surface)
-# Each entry: (max_row, [(block_type, weight), ...])
 DEPTH_LAYERS = [
     (2,  [("grass", 100)]),
     (5,  [("soil", 90), ("stone", 10)]),
@@ -45,7 +42,6 @@ class Block:
         self.x = x
         self.y = y
         self.block_type = block_type
-        self.alive = True
 
     def get_pos(self):
         return (self.x, self.y)
@@ -65,14 +61,12 @@ class digging:
         raw_sky = pygame.image.load(os.path.join(assets_dir, "dip_background.png")).convert()
         self.background_sky = pygame.transform.scale(raw_sky, (SCREEN_WIDTH, SKY_HEIGHT))
 
-        # Load all block images
         self.block_imgs = {}
         for ore in ORE_TYPES:
             path = os.path.join(assets_dir, f"dip_{ore}.png")
             if os.path.exists(path):
                 raw = pygame.image.load(path).convert_alpha()
             else:
-                # fallback: colored surface if image missing
                 raw = pygame.Surface((BLOCK_SIZE, BLOCK_SIZE))
                 fallback_colors = {
                     "grass": (34, 139, 34),
@@ -86,42 +80,24 @@ class digging:
                 raw.fill(fallback_colors.get(ore, (200, 200, 200)))
             self.block_imgs[ore] = pygame.transform.scale(raw, (BLOCK_SIZE, BLOCK_SIZE))
 
-        # Small icons for HUD (32x32)
         self.hud_icons = {}
         for ore in ORE_TYPES:
             if ore == "grass":
-                continue  # don't track grass
+                continue
             self.hud_icons[ore] = pygame.transform.scale(self.block_imgs[ore], (32, 32))
 
-        # Build the grid
         self.grid = []
         for row in range(GRID_ROWS):
             grid_row = []
             for col in range(GRID_COLS):
                 x = col * BLOCK_SIZE
                 y = SKY_HEIGHT + row * BLOCK_SIZE
-                if row == 0:
-                    block_type = "grass"
-                else:
-                    block_type = pick_block_type(row)
+                block_type = "grass" if row == 0 else pick_block_type(row)
                 grid_row.append(Block(x, y, block_type))
             self.grid.append(grid_row)
 
-        # Inventory counter
         self.inventory = {ore: 0 for ore in ORE_TYPES if ore != "grass"}
-
-        # HUD font
         self.font = pygame.font.SysFont(None, 28)
-
-    def draw_background(self, camera_y):
-        self.screen.blit(self.background_sky, (0, -camera_y))
-
-        for row in self.grid:
-            for block in row:
-                if block.block_type != "air":
-                    img = self.block_imgs.get(block.block_type)
-                    if img:
-                        self.screen.blit(img, (block.x, block.y - camera_y))
 
     def get_block_at(self, world_x, world_y):
         col = world_x // BLOCK_SIZE
@@ -130,15 +106,52 @@ class digging:
             return self.grid[row][col]
         return None
 
+    def resolve_collision(self, player_pos, vertical_velocity, on_ground):
+        """Check if the player is standing on a solid block and snap them to it."""
+        PLAYER_WIDTH = 60
+        PLAYER_HEIGHT = 100
+
+        feet_y = player_pos.y + PLAYER_HEIGHT
+        left_x = player_pos.x + 2
+        right_x = player_pos.x + PLAYER_WIDTH
+
+        on_ground = False
+
+        # Check the block directly under the left and right foot
+        for check_x in [left_x, right_x]:
+            col = int(check_x) // BLOCK_SIZE
+            # Find the topmost solid block at or below the player's feet
+            row = int(feet_y) // BLOCK_SIZE - SKY_HEIGHT // BLOCK_SIZE
+            # Convert feet world Y to grid row
+            grid_row = (int(feet_y) - SKY_HEIGHT) // BLOCK_SIZE
+
+            if 0 <= grid_row < GRID_ROWS and 0 <= col < GRID_COLS:
+                block = self.grid[grid_row][col]
+                if block.block_type != "air":
+                    block_top = block.y  # world Y of the top of this block
+                    # If player's feet are at or past this block's top, snap up
+                    if feet_y >= block_top and feet_y <= block_top + BLOCK_SIZE:
+                        player_pos.y = block_top - PLAYER_HEIGHT
+                        vertical_velocity = 0
+                        on_ground = True
+
+        return player_pos, vertical_velocity, on_ground
+
+    def draw_background(self, camera_y):
+        self.screen.blit(self.background_sky, (0, -camera_y))
+        for row in self.grid:
+            for block in row:
+                if block.block_type != "air":
+                    img = self.block_imgs.get(block.block_type)
+                    if img:
+                        self.screen.blit(img, (block.x, block.y - camera_y))
+
     def draw_hud(self):
-        # Draw inventory panel in bottom-left
         panel_x = 10
         panel_y = SCREEN_HEIGHT - 50
         icon_size = 32
         padding = 8
-        text_gap = 36  # space after icon before next icon group
 
-        # Background panel
         panel_width = len(self.inventory) * (icon_size + padding + 40) + padding
         panel_surf = pygame.Surface((panel_width, 48), pygame.SRCALPHA)
         panel_surf.fill((0, 0, 0, 140))
@@ -157,7 +170,8 @@ class digging:
         speed = 300
         vertical_velocity = 0
         on_ground = False
-        ground_y = SKY_HEIGHT - 100
+        # ground_y is only a hard floor safety net at the very bottom
+        ground_y = SKY_HEIGHT + GRID_ROWS * BLOCK_SIZE - 100
         hovered_block = None
 
         while True:
@@ -165,6 +179,11 @@ class digging:
 
             player_pos, vertical_velocity, on_ground, hovered_block = movement(
                 player_pos, vertical_velocity, on_ground, speed, dt, ground_y, self.player
+            )
+
+            # Grid-based collision replaces the fixed ground_y check
+            player_pos, vertical_velocity, on_ground = self.resolve_collision(
+                player_pos, vertical_velocity, on_ground
             )
 
             camera_y = int(player_pos.y - SCREEN_HEIGHT // 2)
@@ -192,9 +211,7 @@ class digging:
                     pygame.draw.rect(self.screen, (255, 255, 0), (bx, by - camera_y, BLOCK_SIZE, BLOCK_SIZE), 3)
 
             self.screen.blit(self.player, (int(player_pos.x), int(player_pos.y) - camera_y))
-
             self.draw_hud()
-
             pygame.display.flip()
 
 
