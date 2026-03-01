@@ -1,6 +1,7 @@
 import pygame
 import sys
 import os
+import random
 from player import movement
 
 SCREEN_WIDTH = 1280
@@ -11,16 +12,39 @@ BLOCK_SIZE = 128
 
 # Grid dimensions
 GRID_COLS = SCREEN_WIDTH // BLOCK_SIZE + 1
-GRID_ROWS = 10  # how many rows of underground blocks you want
+GRID_ROWS = 40  # more rows to allow deeper digging
+
+# Depth thresholds (in grid rows from surface)
+# Each entry: (max_row, [(block_type, weight), ...])
+DEPTH_LAYERS = [
+    (2,  [("grass", 100)]),
+    (5,  [("soil", 90), ("stone", 10)]),
+    (10, [("soil", 60), ("stone", 40)]),
+    (15, [("stone", 70), ("copper", 30)]),
+    (20, [("stone", 40), ("copper", 40), ("gold", 20)]),
+    (25, [("stone", 20), ("copper", 20), ("gold", 40), ("diamond", 20)]),
+    (999,[("stone", 10), ("gold", 20), ("diamond", 40), ("ruby", 30)]),
+]
+
+ORE_TYPES = ["grass", "soil", "stone", "copper", "gold", "diamond", "ruby"]
 
 pygame.init()
+
+
+def pick_block_type(row):
+    for max_row, choices in DEPTH_LAYERS:
+        if row < max_row:
+            types = [c[0] for c in choices]
+            weights = [c[1] for c in choices]
+            return random.choices(types, weights=weights, k=1)[0]
+    return "stone"
 
 
 class Block:
     def __init__(self, x, y, block_type):
         self.x = x
         self.y = y
-        self.block_type = block_type  # "grass" or "soil"
+        self.block_type = block_type
         self.alive = True
 
     def get_pos(self):
@@ -41,22 +65,53 @@ class digging:
         raw_sky = pygame.image.load(os.path.join(assets_dir, "dip_background.png")).convert()
         self.background_sky = pygame.transform.scale(raw_sky, (SCREEN_WIDTH, SKY_HEIGHT))
 
-        raw_grass = pygame.image.load(os.path.join(assets_dir, "dip_grass.png")).convert_alpha()
-        self.grass_img = pygame.transform.scale(raw_grass, (BLOCK_SIZE, BLOCK_SIZE))
+        # Load all block images
+        self.block_imgs = {}
+        for ore in ORE_TYPES:
+            path = os.path.join(assets_dir, f"dip_{ore}.png")
+            if os.path.exists(path):
+                raw = pygame.image.load(path).convert_alpha()
+            else:
+                # fallback: colored surface if image missing
+                raw = pygame.Surface((BLOCK_SIZE, BLOCK_SIZE))
+                fallback_colors = {
+                    "grass": (34, 139, 34),
+                    "soil": (139, 90, 43),
+                    "stone": (128, 128, 128),
+                    "copper": (184, 115, 51),
+                    "gold": (255, 215, 0),
+                    "diamond": (0, 255, 255),
+                    "ruby": (155, 17, 30),
+                }
+                raw.fill(fallback_colors.get(ore, (200, 200, 200)))
+            self.block_imgs[ore] = pygame.transform.scale(raw, (BLOCK_SIZE, BLOCK_SIZE))
 
-        raw_soil = pygame.image.load(os.path.join(assets_dir, "dip_soil.png")).convert()
-        self.soil_img = pygame.transform.scale(raw_soil, (BLOCK_SIZE, BLOCK_SIZE))
+        # Small icons for HUD (32x32)
+        self.hud_icons = {}
+        for ore in ORE_TYPES:
+            if ore == "grass":
+                continue  # don't track grass
+            self.hud_icons[ore] = pygame.transform.scale(self.block_imgs[ore], (32, 32))
 
-        # Build the grid: row 0 = grass, rows 1+ = soil
+        # Build the grid
         self.grid = []
         for row in range(GRID_ROWS):
             grid_row = []
             for col in range(GRID_COLS):
                 x = col * BLOCK_SIZE
                 y = SKY_HEIGHT + row * BLOCK_SIZE
-                block_type = "grass" if row == 0 else "soil"
+                if row == 0:
+                    block_type = "grass"
+                else:
+                    block_type = pick_block_type(row)
                 grid_row.append(Block(x, y, block_type))
             self.grid.append(grid_row)
+
+        # Inventory counter
+        self.inventory = {ore: 0 for ore in ORE_TYPES if ore != "grass"}
+
+        # HUD font
+        self.font = pygame.font.SysFont(None, 28)
 
     def draw_background(self, camera_y):
         self.screen.blit(self.background_sky, (0, -camera_y))
@@ -64,16 +119,38 @@ class digging:
         for row in self.grid:
             for block in row:
                 if block.block_type != "air":
-                    img = self.grass_img if block.block_type == "grass" else self.soil_img
-                    self.screen.blit(img, (block.x, block.y - camera_y))
+                    img = self.block_imgs.get(block.block_type)
+                    if img:
+                        self.screen.blit(img, (block.x, block.y - camera_y))
 
     def get_block_at(self, world_x, world_y):
-        """Return the block at a given world position, or None."""
         col = world_x // BLOCK_SIZE
         row = (world_y - SKY_HEIGHT) // BLOCK_SIZE
         if 0 <= row < GRID_ROWS and 0 <= col < GRID_COLS:
             return self.grid[row][col]
         return None
+
+    def draw_hud(self):
+        # Draw inventory panel in bottom-left
+        panel_x = 10
+        panel_y = SCREEN_HEIGHT - 50
+        icon_size = 32
+        padding = 8
+        text_gap = 36  # space after icon before next icon group
+
+        # Background panel
+        panel_width = len(self.inventory) * (icon_size + padding + 40) + padding
+        panel_surf = pygame.Surface((panel_width, 48), pygame.SRCALPHA)
+        panel_surf.fill((0, 0, 0, 140))
+        self.screen.blit(panel_surf, (panel_x - padding, panel_y - 8))
+
+        x = panel_x
+        for ore in ["soil", "stone", "copper", "gold", "diamond", "ruby"]:
+            icon = self.hud_icons[ore]
+            self.screen.blit(icon, (x, panel_y))
+            count_surf = self.font.render(str(self.inventory[ore]), True, (255, 255, 255))
+            self.screen.blit(count_surf, (x + icon_size + 4, panel_y + 8))
+            x += icon_size + 4 + count_surf.get_width() + padding + 4
 
     def main(self):
         player_pos = pygame.math.Vector2(400, SKY_HEIGHT - 100)
@@ -81,7 +158,7 @@ class digging:
         vertical_velocity = 0
         on_ground = False
         ground_y = SKY_HEIGHT - 100
-        hovered_block = None  # define it here first
+        hovered_block = None
 
         while True:
             dt = self.clock.tick(60) / 1000
@@ -90,27 +167,22 @@ class digging:
                 player_pos, vertical_velocity, on_ground, speed, dt, ground_y, self.player
             )
 
+            camera_y = int(player_pos.y - SCREEN_HEIGHT // 2)
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
                 if event.type == pygame.KEYDOWN:
-                    if event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_e:
-                            print(f"E pressed! hovered_block={hovered_block}")
-                            if hovered_block:
-                                bx, by = hovered_block
-                                block = self.get_block_at(bx, by)
-                                print(f"block found: {block.block_type if block else None}")
-                                if block and block.block_type != "air":
-                                    block.block_type = "air"
-                                    print(f"after delete: {block.block_type}")
-                                    # also check the grid directly
-                                    bx2, by2 = hovered_block
-                                    b2 = self.get_block_at(bx2, by2)
-                                    print(f"grid check: {b2.block_type if b2 else None}") 
+                    if event.key == pygame.K_e and hovered_block:
+                        bx, by = hovered_block
+                        block = self.get_block_at(bx, by)
+                        if block and block.block_type != "air":
+                            mined = block.block_type
+                            block.block_type = "air"
+                            if mined in self.inventory:
+                                self.inventory[mined] += 1
 
-            camera_y = int(player_pos.y - SCREEN_HEIGHT // 2)
             self.draw_background(camera_y)
 
             if hovered_block:
@@ -118,7 +190,11 @@ class digging:
                 block = self.get_block_at(bx, by)
                 if block and block.block_type != "air":
                     pygame.draw.rect(self.screen, (255, 255, 0), (bx, by - camera_y, BLOCK_SIZE, BLOCK_SIZE), 3)
+
             self.screen.blit(self.player, (int(player_pos.x), int(player_pos.y) - camera_y))
+
+            self.draw_hud()
+
             pygame.display.flip()
 
 
