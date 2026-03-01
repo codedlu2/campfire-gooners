@@ -13,6 +13,9 @@ BLOCK_SIZE = 128
 GRID_COLS = SCREEN_WIDTH // BLOCK_SIZE + 1
 GRID_ROWS = 40
 
+PLAYER_WIDTH = 64
+PLAYER_HEIGHT = 100
+
 DEPTH_LAYERS = [
     (2,  [("grass", 100)]),
     (5,  [("soil", 90), ("stone", 10)]),
@@ -56,7 +59,7 @@ class digging:
         assets_dir = os.path.join(os.path.dirname(__file__), "assets", "images")
 
         raw_player = pygame.image.load(os.path.join(assets_dir, "player.jpg")).convert_alpha()
-        self.player = pygame.transform.scale(raw_player, (64, 100))
+        self.player_img = pygame.transform.scale(raw_player, (PLAYER_WIDTH, PLAYER_HEIGHT))
 
         raw_sky = pygame.image.load(os.path.join(assets_dir, "dip_background.png")).convert()
         self.background_sky = pygame.transform.scale(raw_sky, (SCREEN_WIDTH, SKY_HEIGHT))
@@ -99,52 +102,80 @@ class digging:
         self.inventory = {ore: 0 for ore in ORE_TYPES if ore != "grass"}
         self.font = pygame.font.SysFont(None, 28)
 
-    def get_block_at(self, world_x, world_y):
-        col = world_x // BLOCK_SIZE
-        row = (world_y - SKY_HEIGHT) // BLOCK_SIZE
+    def get_block_at_world(self, world_x, world_y):
+        col = int(world_x) // BLOCK_SIZE
+        row = (int(world_y) - SKY_HEIGHT) // BLOCK_SIZE
         if 0 <= row < GRID_ROWS and 0 <= col < GRID_COLS:
             return self.grid[row][col]
         return None
 
-    def resolve_collision(self, player_pos, vertical_velocity, on_ground):
-        """Check if the player is standing on a solid block and snap them to it."""
-        PLAYER_WIDTH = 60
-        PLAYER_HEIGHT = 100
+    def find_ground_y(self, player_x):
+        """Scan downward under both feet and return the Y the player should stand at."""
+        best_ground = SKY_HEIGHT + GRID_ROWS * BLOCK_SIZE
 
-        feet_y = player_pos.y + PLAYER_HEIGHT
-        left_x = player_pos.x + 2
-        right_x = player_pos.x + PLAYER_WIDTH
-
-        on_ground = False
-
-        # Check the block directly under the left and right foot
-        for check_x in [left_x, right_x]:
-            col = int(check_x) // BLOCK_SIZE
-            # Find the topmost solid block at or below the player's feet
-            row = int(feet_y) // BLOCK_SIZE - SKY_HEIGHT // BLOCK_SIZE
-            # Convert feet world Y to grid row
-            grid_row = (int(feet_y) - SKY_HEIGHT) // BLOCK_SIZE
-
-            if 0 <= grid_row < GRID_ROWS and 0 <= col < GRID_COLS:
-                block = self.grid[grid_row][col]
+        for foot_x in [player_x + 4, player_x + PLAYER_WIDTH - 4]:
+            col = int(foot_x) // BLOCK_SIZE
+            if not (0 <= col < GRID_COLS):
+                continue
+            for row in range(GRID_ROWS):
+                block = self.grid[row][col]
                 if block.block_type != "air":
-                    block_top = block.y  # world Y of the top of this block
-                    # If player's feet are at or past this block's top, snap up
-                    if feet_y >= block_top and feet_y <= block_top + BLOCK_SIZE:
-                        player_pos.y = block_top - PLAYER_HEIGHT
-                        vertical_velocity = 0
-                        on_ground = True
+                    candidate = block.y - PLAYER_HEIGHT
+                    if candidate < best_ground:
+                        best_ground = candidate
+                    break
+
+        return best_ground
+
+    def snap_player_to_ground(self, player_pos, vertical_velocity, on_ground):
+        """Prevent player falling through solid blocks."""
+        feet_y = player_pos.y + PLAYER_HEIGHT
+
+        for foot_x in [player_pos.x + 4, player_pos.x + PLAYER_WIDTH - 4]:
+            col = int(foot_x) // BLOCK_SIZE
+            if not (0 <= col < GRID_COLS):
+                continue
+            row = (int(feet_y) - SKY_HEIGHT) // BLOCK_SIZE
+            if 0 <= row < GRID_ROWS:
+                block = self.grid[row][col]
+                if block.block_type != "air" and vertical_velocity >= 0:
+                    player_pos.y = block.y - PLAYER_HEIGHT
+                    vertical_velocity = 0
+                    on_ground = True
 
         return player_pos, vertical_velocity, on_ground
 
-    def draw_background(self, camera_y):
+    def mine_block(self, hovered_block, player_pos, vertical_velocity, on_ground):
+        bx, by = hovered_block
+        block = self.get_block_at_world(bx, by)
+        if not block or block.block_type == "air":
+            return vertical_velocity, on_ground
+
+        mined = block.block_type
+        block.block_type = "air"
+        if mined in self.inventory:
+            self.inventory[mined] += 1
+
+        # Instantly snap player to where they should now be standing
+        new_ground = self.find_ground_y(player_pos.x)
+        player_pos.y = new_ground
+        vertical_velocity = 0
+        on_ground = True
+
+        return vertical_velocity, on_ground
+
+    def draw_world(self, camera_y):
+        self.screen.fill((20, 12, 8))  # dark background - prevents any trail
         self.screen.blit(self.background_sky, (0, -camera_y))
+
         for row in self.grid:
             for block in row:
                 if block.block_type != "air":
                     img = self.block_imgs.get(block.block_type)
                     if img:
-                        self.screen.blit(img, (block.x, block.y - camera_y))
+                        screen_y = block.y - camera_y
+                        if -BLOCK_SIZE < screen_y < SCREEN_HEIGHT + BLOCK_SIZE:
+                            self.screen.blit(img, (block.x, screen_y))
 
     def draw_hud(self):
         panel_x = 10
@@ -152,7 +183,7 @@ class digging:
         icon_size = 32
         padding = 8
 
-        panel_width = len(self.inventory) * (icon_size + padding + 40) + padding
+        panel_width = 6 * (icon_size + padding + 40) + padding
         panel_surf = pygame.Surface((panel_width, 48), pygame.SRCALPHA)
         panel_surf.fill((0, 0, 0, 140))
         self.screen.blit(panel_surf, (panel_x - padding, panel_y - 8))
@@ -166,23 +197,21 @@ class digging:
             x += icon_size + 4 + count_surf.get_width() + padding + 4
 
     def main(self):
-        player_pos = pygame.math.Vector2(400, SKY_HEIGHT - 100)
+        player_pos = pygame.math.Vector2(400, SKY_HEIGHT - PLAYER_HEIGHT)
         speed = 300
         vertical_velocity = 0
         on_ground = False
-        # ground_y is only a hard floor safety net at the very bottom
-        ground_y = SKY_HEIGHT + GRID_ROWS * BLOCK_SIZE - 100
+        ground_y = SKY_HEIGHT + GRID_ROWS * BLOCK_SIZE
         hovered_block = None
 
         while True:
             dt = self.clock.tick(60) / 1000
 
             player_pos, vertical_velocity, on_ground, hovered_block = movement(
-                player_pos, vertical_velocity, on_ground, speed, dt, ground_y, self.player
+                player_pos, vertical_velocity, on_ground, speed, dt, ground_y, self.player_img
             )
 
-            # Grid-based collision replaces the fixed ground_y check
-            player_pos, vertical_velocity, on_ground = self.resolve_collision(
+            player_pos, vertical_velocity, on_ground = self.snap_player_to_ground(
                 player_pos, vertical_velocity, on_ground
             )
 
@@ -194,23 +223,22 @@ class digging:
                     sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_e and hovered_block:
-                        bx, by = hovered_block
-                        block = self.get_block_at(bx, by)
-                        if block and block.block_type != "air":
-                            mined = block.block_type
-                            block.block_type = "air"
-                            if mined in self.inventory:
-                                self.inventory[mined] += 1
+                        vertical_velocity, on_ground = self.mine_block(
+                            hovered_block, player_pos, vertical_velocity, on_ground
+                        )
 
-            self.draw_background(camera_y)
+            self.draw_world(camera_y)
 
             if hovered_block:
                 bx, by = hovered_block
-                block = self.get_block_at(bx, by)
+                block = self.get_block_at_world(bx, by)
                 if block and block.block_type != "air":
-                    pygame.draw.rect(self.screen, (255, 255, 0), (bx, by - camera_y, BLOCK_SIZE, BLOCK_SIZE), 3)
+                    pygame.draw.rect(
+                        self.screen, (255, 255, 0),
+                        (bx, by - camera_y, BLOCK_SIZE, BLOCK_SIZE), 3
+                    )
 
-            self.screen.blit(self.player, (int(player_pos.x), int(player_pos.y) - camera_y))
+            self.screen.blit(self.player_img, (int(player_pos.x), int(player_pos.y) - camera_y))
             self.draw_hud()
             pygame.display.flip()
 

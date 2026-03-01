@@ -23,11 +23,11 @@ def movement(player_pos, vertical_velocity, on_ground, speed, dt, ground_y, imag
     player_center_x = int(player_pos.x) + 32
     player_col = player_center_x // BLOCK_SIZE
 
-    # Row the player's body is in
-    player_body_row = (int(player_pos.y) - SKY_HEIGHT) // BLOCK_SIZE
+    # Row at player's body (torso)
+    player_body_row = max(0, (int(player_pos.y) - SKY_HEIGHT) // BLOCK_SIZE)
     # Row at player's feet
     player_feet_y = int(player_pos.y) + 100
-    player_feet_row = (player_feet_y - SKY_HEIGHT) // BLOCK_SIZE
+    player_feet_row = max(0, (player_feet_y - SKY_HEIGHT) // BLOCK_SIZE)
 
     hovered_block = None
     if keys[pygame.K_RIGHT]:
@@ -43,7 +43,6 @@ def movement(player_pos, vertical_velocity, on_ground, speed, dt, ground_y, imag
     vertical_velocity += GRAVITY * dt
     player_pos.y += vertical_velocity * dt
 
-    # Ground collision (handled by main now, but keep fallback)
     if player_pos.y >= ground_y:
         player_pos.y = ground_y
         vertical_velocity = 0
